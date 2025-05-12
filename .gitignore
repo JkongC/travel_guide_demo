@@ -1,0 +1,5 @@
+.idea
+.gradio
+__pycache__
+
+api_key.txt
