@@ -3,8 +3,12 @@ from openai import OpenAI
 
 class Model:
     def __init__(self):
-        with open("api_key.txt", "r", encoding="utf-8") as f:
-            key = f.readline().strip()
+        try:
+            with open("api_key.txt", "r", encoding="utf-8") as f:
+                key = f.readline().strip()
+        except FileNotFoundError:
+            print("API key not found! Please check if \"api_key.txt\" exists!\"")
+            raise
 
         self.__client = OpenAI(api_key=key, base_url="https://api.deepseek.com")
 

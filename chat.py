@@ -1,29 +1,38 @@
 import asyncio
 
 import gradio as gr
+
 from model import Model
+from info import LocationInfoGetter, get_location_js
 
 
 class ChatInterface:
-    def __init__(self, model: Model, stream_output: bool = False):
+    def __init__(self, model: Model, stream_output: bool = False, prompt: str = "You are a helpful assistant."):
         self.__model = model
         self.__stream_output = stream_output
+        self.__prompt = prompt
+
+        self.__location_getter = LocationInfoGetter()
 
         # Define the interface.
         with gr.Blocks() as gr_ui:
             chatbot = gr.Chatbot(type='messages', resizable=True, render_markdown=True)
             user_input = gr.Textbox(label='Ask anything...')
+            use_location_info = gr.Checkbox(label='Do you want to tell me your location?', value=False)
             submit_btn = gr.Button("Send")
             clear_btn = gr.Button("Clear history")
 
             # Saves the conversations.
-            history = gr.State([])
+            history = gr.State([{"role": "system", "content": prompt}])
+            user_longitude = gr.Number(visible=False, value=-0.1)
+            user_latitude = gr.Number(visible=False, value=-0.1)
 
             # Add user message to history, then wait for chatbot's reply.
             submit_btn.click(
-                fn=ChatInterface.__add_user_message,
-                inputs=[history, user_input],
-                outputs=[chatbot, user_input],
+                fn=self.__add_user_message,
+                inputs=[history, user_input, use_location_info, user_longitude, user_latitude],
+                outputs=[chatbot, user_input, use_location_info, user_longitude, user_latitude],
+                js=get_location_js(),
                 queue=False
             ).then(
                 fn=self.__wait_for_stream_reply if self.__stream_output else self.__wait_for_reply,
@@ -33,9 +42,10 @@ class ChatInterface:
 
             # Same. This is to support pressing Enter to send messages.
             user_input.submit(
-                fn=ChatInterface.__add_user_message,
-                inputs=[history, user_input],
-                outputs=[chatbot, user_input],
+                fn=self.__add_user_message,
+                inputs=[history, user_input, use_location_info, user_longitude, user_latitude],
+                outputs=[chatbot, user_input, use_location_info, user_longitude, user_latitude],
+                js=get_location_js(),
                 queue=False
             ).then(
                 fn=self.__wait_for_stream_reply if self.__stream_output else self.__wait_for_reply,
@@ -44,7 +54,7 @@ class ChatInterface:
             )
 
             clear_btn.click(
-                fn=ChatInterface.__empty_history,
+                fn=self.__empty_history,
                 inputs=history,
                 outputs=chatbot
             )
@@ -76,15 +86,19 @@ class ChatInterface:
         else:
             return
 
-    @staticmethod
-    def __empty_history(history: gr.State) -> gr.State:
+    def __empty_history(self, history: gr.State) -> gr.State:
         if isinstance(history, list):
-            history.clear()
+            history = [{"role": "system", "content": self.__prompt}]
 
         return history
 
-    @staticmethod
-    def __add_user_message(history: gr.State, content: str) -> tuple[gr.State, str]:
+    def __add_user_message(self, history: gr.State, content: str, use_location: bool, user_longitude: float, user_latitude: float):
         history += [{"role": "user", "content": content}]
-        return history, ""
+        if use_location:
+            address = self.__location_getter.get_location_name(user_longitude, user_latitude)
+            if address is not None:
+                history += [{"role": "system", "content": f"[[补充信息]] 用户的位置为：{address}"}]
+                use_location = False
+        return history, "", use_location, user_longitude, user_latitude
+
 
