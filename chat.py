@@ -3,7 +3,7 @@ import asyncio
 import gradio as gr
 
 from model import Model
-from info import LocationInfoGetter, get_location_js
+from info import AMAPInfoGetter, get_location_js
 
 
 class ChatInterface:
@@ -12,7 +12,9 @@ class ChatInterface:
         self.__stream_output = stream_output
         self.__prompt = prompt
 
-        self.__location_getter = LocationInfoGetter()
+        self.__info_getter = AMAPInfoGetter()
+        self.__location_got = False
+        self.__weather_got = False
 
         # Define the interface.
         with gr.Blocks() as gr_ui:
@@ -95,10 +97,27 @@ class ChatInterface:
     def __add_user_message(self, history: gr.State, content: str, use_location: bool, user_longitude: float, user_latitude: float):
         history += [{"role": "user", "content": content}]
         if use_location:
-            address = self.__location_getter.get_location_name(user_longitude, user_latitude)
-            if address is not None:
-                history += [{"role": "system", "content": f"[[补充信息]] 用户的位置为：{address}"}]
-                use_location = False
+            history = self.__add_location_info(history, user_longitude, user_latitude)
+            history = self.__add_weather_info(history)
+
         return history, "", use_location, user_longitude, user_latitude
 
+    def __add_location_info(self, history: gr.State, user_longitude: float, user_latitude: float):
+        if not self.__location_got:
+            address = self.__info_getter.get_location_name(user_longitude, user_latitude)
+            if address is not None:
+                history += [{"role": "system", "content": f"[[补充信息]] 用户的位置为：{address}"}]
+                self.__location_got = True
 
+        return history
+
+    def __add_weather_info(self, history: gr.State):
+        if self.__location_got and not self.__weather_got:
+            data = self.__info_getter.get_weather_info()
+            if data is not None:
+                weather_prompt = f"[[补充信息]] 用户位置的天气为：{data.weather}，气温为：{data.temperature}，"\
+                        f"风向为：{data.wind_direction}，风力为：{data.wind_power}，湿度为：{data.humidity}"
+                history += [{"role": "system", "content": weather_prompt}]
+                self.__weather_got = True
+
+        return history
