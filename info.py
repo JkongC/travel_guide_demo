@@ -1,4 +1,5 @@
 import datetime
+import json
 import threading
 import time
 from dataclasses import dataclass
@@ -7,10 +8,12 @@ import pytz
 import requests
 from timezonefinder import TimezoneFinder
 
+from model import Model
+
 
 def get_location_js() -> str:
     return """
-    async function (history, user_input, use_location_info, user_longitude, user_latitude) {
+    async function (history, user_input, use_location_info, fetch_more_data, user_longitude, user_latitude) {
         let geoLocation = null;
         
         if (use_location_info === true) {
@@ -36,7 +39,7 @@ def get_location_js() -> str:
             }
         }
         
-        return [history, user_input, use_location_info, user_longitude, user_latitude];
+        return [history, user_input, use_location_info, fetch_more_data, user_longitude, user_latitude];
     }
     """
 
@@ -53,6 +56,13 @@ class WeatherData:
 class LocationData:
     longitude: float
     latitude: float
+
+@dataclass
+class UserPreference:
+    poi_type: str | None
+    poi_name: str | None
+    scope: str | None
+    distance: float | None
 
 class AMAPInfoGetter:
     __key = None
@@ -102,6 +112,15 @@ class AMAPInfoGetter:
         self.__adcode_cache = data['regeocode']['addressComponent']['adcode']
         self.__location_name_cache = data['regeocode']['formatted_address']
         return self.__location_name_cache
+
+    @staticmethod
+    def get_adcode(location: str) -> str | None:
+        url = f"https://restapi.amap.com/v3/geocode/geo?key={AMAPInfoGetter.__key}&address={location}"
+        response = requests.get(url)
+        data = response.json()
+        if data['status'] != '1':
+            return None
+        return data['geocodes']['adcode']
 
     def get_weather_info(self):
         if self.__weather_cache is not None:
@@ -154,5 +173,53 @@ class AMAPInfoGetter:
 
         return False
 
+    def get_keyword_info(self, pref: UserPreference) -> list[str] | None:
+        if pref.scope is not None:
+            adcode = AMAPInfoGetter.get_adcode(pref.scope)
+            url = f"https://restapi.amap.com/v5/place/text?key={AMAPInfoGetter.__key}&keywords={pref.poi_name}&region={adcode}"
+        else:
+            if self.__location_cache is None:
+                return None
+            url = (f"https://restapi.amap.com/v5/place/around?key={AMAPInfoGetter.__key}&keywords={pref.poi_name}"
+                   f"&location={self.__location_cache.longitude},{self.__location_cache.latitude}&radius={int(pref.distance)}")
+
+        response = requests.get(url)
+        data = response.json()
+        if data['status'] != '1':
+            return None
+
+        pois = []
+        for i, poi in enumerate(data['pois']):
+            pois.append(f"[{i+1}]名称：{poi['name']}，类型：{poi['type']}，"
+                        f"地区：{poi['adname']}，地址：{poi['address']} ")
+
+        return pois
+
+
+class PreferenceInfoGetter:
+    __prompt: dict
+
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def get_preference(model: Model, user_input: str) -> UserPreference:
+        history = [PreferenceInfoGetter.__prompt, {"role": "user", "content": user_input}]
+        obj = json.loads(model.normal_chat(history))
+        ret = UserPreference(poi_type=obj["poi_type"],
+                             poi_name=obj["poi_name"],
+                             scope=obj["scope"],
+                             distance=obj["distance"])
+        return ret
+
+    @staticmethod
+    def init_prompt():
+        try:
+            with open("parser_prompt.txt", "r", encoding="utf-8") as f:
+                PreferenceInfoGetter.__prompt = {"role": "system", "content": f.read()}
+        except FileNotFoundError:
+            print("Parser prompt not found! Please check if parser_prompt.txt exists!")
+            raise
 
 AMAPInfoGetter.init_key()
+PreferenceInfoGetter.init_prompt()

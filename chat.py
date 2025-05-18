@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import gradio as gr
 
 from model import Model
-from info import AMAPInfoGetter, get_location_js
+from info import AMAPInfoGetter, get_location_js, PreferenceInfoGetter, UserPreference
 
 
 class ChatInterface:
@@ -43,7 +43,8 @@ class ChatInterface:
             with gr.Blocks() as gr_ui:
                 chatbot = gr.Chatbot(type='messages', resizable=True, render_markdown=True)
                 user_input = gr.Textbox(label='Ask anything...')
-                use_location_info = gr.Checkbox(label='Do you want to tell me your location?', value=False)
+                use_location_info = gr.Checkbox(label='Tell me your location', value=False)
+                fetch_more_data = gr.Checkbox(label='Fetch more data for you, but my reply would be slower', value=False)
                 submit_btn = gr.Button("Send")
                 clear_btn = gr.Button("Clear history")
 
@@ -54,8 +55,8 @@ class ChatInterface:
 
                 # Add user message to history, then wait for chatbot's reply.
                 submit_btn.click(
-                    fn=self.__add_user_message,
-                    inputs=[history, user_input, use_location_info, user_longitude, user_latitude],
+                    fn=self.__process_input,
+                    inputs=[history, user_input, use_location_info, fetch_more_data, user_longitude, user_latitude],
                     outputs=[chatbot, user_input, use_location_info, user_longitude, user_latitude],
                     js=get_location_js(),
                     queue=False
@@ -67,8 +68,8 @@ class ChatInterface:
 
                 # Same. This is to support pressing Enter to send messages.
                 user_input.submit(
-                    fn=self.__add_user_message,
-                    inputs=[history, user_input, use_location_info, user_longitude, user_latitude],
+                    fn=self.__process_input,
+                    inputs=[history, user_input, use_location_info, fetch_more_data, user_longitude, user_latitude],
                     outputs=[chatbot, user_input, use_location_info, user_longitude, user_latitude],
                     js=get_location_js(),
                     queue=False
@@ -102,6 +103,37 @@ class ChatInterface:
         self.__ui.queue(max_size=100, api_open=False)
         self.__ui.launch(share)
 
+    def __process_input(self,
+                        history: gr.State,
+                        content: str,
+                        use_location: bool,
+                        fetch_more_data: bool,
+                        user_longitude: float,
+                        user_latitude: float,
+                        request: gr.Request):
+        if request:
+            sid = request.session_hash
+            if sid not in ChatInterface.__client_infos:
+                with ChatInterface.__lock:
+                    ChatInterface.__client_infos[sid] = ChatInterface.ClientInfo(info_getter=AMAPInfoGetter())
+            ChatInterface.__client_last_active[sid] = time.time()
+
+        if time.time() - ChatInterface.__last_clean > 60:
+            ChatInterface.__clean_expired_info()
+
+        if use_location:
+            history = ChatInterface.__add_location_info(history, user_longitude, user_latitude, request)
+            history = ChatInterface.__add_weather_info(history, request)
+            history = ChatInterface.__add_date_time_info(history, request)
+
+        history = ChatInterface.__add_user_message(history, content)
+
+        if fetch_more_data:
+            pref = PreferenceInfoGetter.get_preference(self.__model, content)
+            history = ChatInterface.__add_poi_info(history, pref, request)
+
+        return history, "", use_location, user_longitude, user_latitude
+
     # Wait for chatbot's reply until it's completely finished.
     def __wait_for_reply(self, history: gr.State) -> gr.State:
         if isinstance(history, list):
@@ -134,29 +166,9 @@ class ChatInterface:
         return history
 
     @staticmethod
-    def __add_user_message(history: gr.State,
-                           content: str,
-                           use_location: bool,
-                           user_longitude: float,
-                           user_latitude: float,
-                           request: gr.Request):
-        if request:
-            sid = request.session_hash
-            if sid not in ChatInterface.__client_infos:
-                with ChatInterface.__lock:
-                    ChatInterface.__client_infos[sid] = ChatInterface.ClientInfo(info_getter=AMAPInfoGetter())
-            ChatInterface.__client_last_active[sid] = time.time()
-
-        if time.time() - ChatInterface.__last_clean > 60:
-            ChatInterface.__clean_expired_info()
-
+    def __add_user_message(history: gr.State,content: str):
         history += [{"role": "user", "content": content}]
-        if use_location:
-            history = ChatInterface.__add_location_info(history, user_longitude, user_latitude, request)
-            history = ChatInterface.__add_weather_info(history, request)
-            history = ChatInterface.__add_date_time_info(history, request)
-
-        return history, "", use_location, user_longitude, user_latitude
+        return history
 
     @staticmethod
     def __add_location_info(history: gr.State,
@@ -189,6 +201,19 @@ class ChatInterface:
         if data is not None:
             dt_prompt = f"[辅助信息] 用户的日期和时间（格式%Y-%m-%d %H-%M-%S）为：{data}"
             history += [{"role": "system", "content": dt_prompt}]
+
+        return history
+
+    @staticmethod
+    def __add_poi_info(history: gr.State, pref: UserPreference, request: gr.Request):
+        info_getter = ChatInterface.__client_infos[request.session_hash].info_getter
+        if pref.poi_name is not None:
+            if (pois := info_getter.get_keyword_info(pref)) is not None:
+                poi_prompt = "[辅助信息] 与用户询问的地点相关的poi如下："
+                for poi_str in pois:
+                    poi_prompt += poi_str
+                history += [{"role": "system", "content": poi_prompt}]
+                print(poi_prompt)
 
         return history
 
